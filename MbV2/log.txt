@@ -1,0 +1,27 @@
+import time
+
+timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+lf = osp.join("log_file", f'{timestamp}.log')
+
+    f = open(lf,'a')
+    a = 'Epoch:  {} \t'.format(epoch)
+    f.write(str(a))
+    f.close
+
+    print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+    A = '* Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}\n'.format(top1=top1, top5=top5)
+    f = open(lf,'a')
+    f.write(str(A))
+    f.close
+
+
+def set_random_seed(seed=42):
+    torch.manual_seed(seed)  # torch的cpu随机性
+    torch.cuda.manual_seed_all(seed)  # torch的gpu随机性
+    torch.backends.cudnn.benchmark = False  # 保证gpu每次都选择相同的算法，但是不保证该算法是deterministic的。
+    torch.backends.cudnn.deterministic = True  # 紧接着上面，保证算法是deterministic的。
+    # np.random.seed(seed)  # np的随机性。
+    # random.seed(seed)  # python的随机性。
+    os.environ['PYTHONHASHSEED'] = str(seed)  # 设置python哈希种子，有人不知道这个是干啥的，
+
+    set_random_seed(42)

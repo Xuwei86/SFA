@@ -1,0 +1,18 @@
+class SE(nn.Module):
+    def __init__(self, inplanes, reduction=16):
+        super(SE, self).__init__()
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), # 自适应平均池化，输出一维向量
+            nn.Conv2d(inplanes, inplanes//reduction, 1, 1, 0),# 与下面注释效果一致
+            # nn.Linear(inplanes, inplanes // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(inplanes // reduction, inplanes, 1, 1, 0),# 与下面注释效果一致
+            # nn.Linear(inplanes // reduction, inplanes, bias=False),
+            nn.Sigmoid()
+        )
+
+
+    def forward(self, x):
+        input = x
+        x = self.se(x)
+        return input*x
