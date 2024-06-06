@@ -3,6 +3,26 @@ import torch.nn as nn
 import math
 
 
+class modify_sigmoid20(torch.autograd.Function):
+    @staticmethod
+    def forward(self,inp):
+        exp_x = torch.exp(-2*inp)
+        result = 1/(1+exp_x)
+        self.save_for_backward(result)
+        return result
+    @staticmethod
+    def backward(self,grad_output):
+        inp, = self.saved_tensors
+        exp_x = torch.exp(-2*inp)
+        return  grad_output * (2*exp_x/(1+exp_x)**2)
+class ms20(nn.Module):
+    def __int__(self):
+        super().__int__()
+    def forward(self,x):
+        out = modify_sigmoid20.apply(x)
+        return out
+
+
 class se_block(nn.Module):
     def __init__(self, channel, ratio=16):
         super(se_block, self).__init__()
@@ -25,7 +45,6 @@ class se_block(nn.Module):
         #     f.write(str(a),)
         #     f.close
         return x * y
-
 
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=8):
@@ -90,6 +109,12 @@ class eca_block(nn.Module):
     def forward(self, x):
         y = self.avg_pool(x)
         y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+        # val1= [item.cpu().detach().numpy() for item in y[0][0]]
+        # for i in val1:
+        #     f = open(nano_eca_file,'a')
+        #     a = "%f,"%(i)
+        #     f.write(str(a),)
+        #     f.close
         y = self.sigmoid(y)
         return x * y.expand_as(x)
 
@@ -234,15 +259,48 @@ class CA_gn(nn.Module):
         out = x * s_h.expand_as(x) * s_w.expand_as(x)
         return out
 
+class CA2(nn.Module):
+    def __init__(self,  channel1):
+        super(CA2, self).__init__()
 
+        ks1 = 3
+        p1 = ks1 // 2
+        self.conv1 = nn.Conv1d(channel1, channel1, kernel_size=ks1, padding=p1, bias=False)
+
+        ks2 = 5
+        p2 = ks2 // 2
+        self.conv2 = nn.Conv1d(channel1, channel1, kernel_size=ks2, padding=p2, bias=False)
+
+        self.relu = nn.ReLU()
+        self.bn = nn.BatchNorm2d(channel1)
+
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print("b={0} c={1} h={2}  w={3} ".format(b,c,h,w))
+
+        x_h = torch.mean(x, dim=3, keepdim=True)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+
+        x_h = x_h.view(b, c, h)
+        x_w = x_w.view(b, c, h)
+
+        x_h = self.sig(self.conv1(x_h))
+        x_w = self.sig(self.conv1(x_w))
+        x_h = x_h.view(b, c, h, 1 )
+        x_w = x_w.view(b, c, 1, w)
+        y = x_h * x_w
+
+        return x * y
 
 class ELA72(nn.Module):
-    def __init__(self,  channel, ks=7):
+    def __init__(self,  channel, ks=5):
         super(ELA72, self).__init__()
 
         p = ks // 2
-        self.conv = nn.Conv1d(channel, channel, kernel_size=ks, padding=p, groups=channel//8, bias=False)
-        self.gn = nn.GroupNorm(16, channel)
+        self.conv = nn.Conv1d(channel, channel, kernel_size=ks, padding=p, groups=channel, bias=False)
+        self.gn = nn.GroupNorm(32, channel)
         self.sig = nn.Sigmoid()
 
     def forward(self, x):
@@ -275,6 +333,67 @@ class ELA73(nn.Module):
         x_w = self.sig(self.gn(self.conv(x_w))).view(b, c, 1, w)
 
         return x * x_h * x_w
+
+class ELA702(nn.Module):
+    def __init__(self,  channel, ks=5):
+        super(ELA702, self).__init__()
+
+        p = ks // 2
+        self.conv = nn.Conv2d(channel, channel, kernel_size=ks, padding=p, groups=channel, bias=False)
+        self.gn = nn.GroupNorm(32,channel)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+
+        x_h = self.sig(self.gn(self.conv(x_h)))
+        x_w = self.sig(self.gn(self.conv(x_w)))
+
+        return x * x_h * x_w
+
+class ELA10(nn.Module):
+    def __init__(self,  channel, ks=5):
+        super(ELA10, self).__init__()
+
+        p = ks // 2
+        self.conv = nn.Conv1d(channel, channel, kernel_size=ks, padding=p, groups=channel//8, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).view(b, c, h)
+        x_w = torch.mean(x, dim=2, keepdim=True).view(b, c, w)
+
+        x_h = self.sig(self.conv(x_h)).view(b, c, h, 1)
+        x_w = self.sig(self.conv(x_w)).view(b, c, 1, w)
+
+        return x * x_h * x_w
+
+
+
+class ELA2(nn.Module):
+    def __init__(self,  channel, ks=3):
+        super(ELA2, self).__init__()
+
+        p = ks // 2
+        self.conv = nn.Conv1d(channel, channel, kernel_size=ks, padding=p, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).view(b, c, h)
+        x_w = torch.mean(x, dim=2, keepdim=True).view(b, c, w)
+
+        x_h = self.sig(self.conv(x_h)).view(b, c, h, 1)
+        x_w = self.sig(self.conv(x_w)).view(b, c, 1, w)
+
+        return x * x_h * x_w
+
 
 class SGE(nn.Module):
 
@@ -374,19 +493,148 @@ class sa_layer(nn.Module):
         out = self.channel_shuffle(out, 2)
         return out
 
-class SFA(nn.Module):
+class sa_la(nn.Module):
+    """Constructs a Channel Spatial Group module.
+    Args:
+        k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, ks=7, groups=8, gamma=2, b=1):
+        super(sa_la, self).__init__()
+        from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False )
+
+        p = ks // 2
+        c = channel // (groups * 2)
+        self.conv2 = nn.Conv1d(c, c, kernel_size=ks, padding=p, groups=1, bias=False)
+        self.gn = nn.GroupNorm(channel // (2 * groups), channel // (2 * groups))
+        self.sig = nn.Sigmoid()
+
+    @staticmethod
+    def channel_shuffle(x, groups):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b, groups, -1, h, w)
+        x = x.permute(0, 2, 1, 3, 4)
+
+        # flatten
+        x = x.reshape(b, -1, h, w)
+
+        return x
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # channel attention
+        b1, c1, h, w = x_0.shape
+
+        y = self.avg_pool(x_0).view([b1, 1, c1])
+        y = self.conv1(y)
+        y = self.sig(y).view([b1, c1, 1, 1])
+        xn =  x_0 * y
+
+        # spatial attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.gn(self.conv2(x_h))).view(b2, c2, h, 1)
+        x_w = self.sig(self.gn(self.conv2(x_w))).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        out = self.channel_shuffle(out, 2)
+        return out
+
+
+class sa_ela(nn.Module):
     """Constructs a Channel Spatial Group module.
     Args:
         k_size: Adaptive selection of kernel size
     """
 
     def __init__(self, channel, ks=7, groups=16, gamma=2, b=1):
-        super(SFA, self).__init__()
+        super(sa_ela, self).__init__()
+        from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p = ks // 2
+        c = channel // (groups * 2)
+        self.conv2 = nn.Conv1d(c, c, kernel_size=ks, padding=p, groups=1, bias=False)
+        self.gn = nn.GroupNorm(channel // (2 * groups), channel // (2 * groups))
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # channel attention
+        b1, c1, h, w = x_0.shape
+
+        y = self.avg_pool(x_0).view([b1, 1, c1])
+        y = self.conv1(y)
+        y = self.sig(y).view([b1, c1, 1, 1])
+        xn = x_0 * y
+
+        # spatial attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.gn(self.conv2(x_h))).view(b2, c2, h, 1)
+        x_w = self.sig(self.gn(self.conv2(x_w))).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sfa(nn.Module):
+    """Constructs a Channel Spatial Group module.
+    Args:
+        k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, ks=7, groups=16, gamma=2, b=1):
+        super(sfa, self).__init__()
         # from torch.nn.parameter import Parameter
 
         self.groups = groups
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
 
         kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
         kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
@@ -410,7 +658,67 @@ class SFA(nn.Module):
         # channel attention
         b1, c1, h, w = x_0.shape
 
-        y = (self.avg_pool(x_0)*1.15 + self.max_pool(x_0) * 0.25).view([b1, 1, c1])
+        y = self.avg_pool(x_0).view([b1, 1, c1])
+        y = self.conv1(y)
+        y = self.sig(y).view([b1, c1, 1, 1])
+        xn = x_0 * y
+
+        # spatial attention
+
+        # print("AAAAAAAAAAAAA")
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv2(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv2(x_w)).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela22(nn.Module):
+    """Constructs a Channel Spatial Group module.
+    Args:
+        k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, ks=7, groups=32, gamma=2, b=1):
+        super(sa_ela22, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p = ks // 2
+        c = channel // (groups * 2)
+        self.conv2 = nn.Conv1d(c, c, kernel_size=ks, padding=p, groups=c, bias=False)
+        # self.gn = nn.GroupNorm(channel // (2 * groups), channel // (2 * groups))
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # channel attention
+        b1, c1, h, w = x_0.shape
+
+        y = (self.avg_pool(x_0) * 0.75  + self.max_pool(x_0) * 0.25).view([b1, 1, c1])
         y = self.conv1(y)
         y = self.sig(y).view([b1, c1, 1, 1])
         xn = x_0 * y
@@ -433,8 +741,1150 @@ class SFA(nn.Module):
 
         return out
 
+class sa_ela20_t(nn.Module):
+    """Constructs a Channel Spatial Group module.
+    Args:
+        k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, ks=7, groups=32, gamma=2, b=1):
+        super(sa_ela20_t, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p = ks // 2
+        c = channel // (groups * 2)
+        self.conv2 = nn.Conv1d(c, c, kernel_size=ks, padding=p, groups=1, bias=False)
+        self.gn = nn.GroupNorm(channel // (2 * groups), channel // (2 * groups))
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # channel attention
+        b1, c1, h, w = x_0.shape
+
+        y = self.avg_pool(x_0).view([b1, 1, c1])
+        y = self.conv1(y)
+        y = self.sig(y).view([b1, c1, 1, 1])
+        xn = x_0 * y
+
+        # spatial attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.gn(self.conv2(x_h))).view(b2, c2, h, 1)
+        x_w = self.sig(self.gn(self.conv2(x_w))).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela3(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+
+    def __init__(self, channel, ks=5, groups=32, gamma=2, b=1):
+        super(sa_ela3, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p = ks // 2
+        c = channel // (groups * 2)
+        self.conv21 = nn.Conv1d(c, c, kernel_size=ks, padding=p, groups=1, bias=False)
+        p = (ks-2) // 2
+        c = channel // (groups * 2)
+        self.conv20 = nn.Conv1d(c, c, kernel_size=ks-2, padding=p, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # channel attention
+        b1, c1, h, w = x_0.shape
+
+        y = self.avg_pool(x_0).view([b1, 1, c1])
+        y = self.conv1(y)
+        y = self.sig(y).view([b1, c1, 1, 1])
+        xn = x_0 * y
+
+        # spatial attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv21(self.sig(self.conv20(x_h)))).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv21(self.sig(self.conv20(x_w)))).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+class sa_ela10(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=32, kernel=7):
+        super(sa_ela10, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        p1 = 3 if kernel== 7 else 1
+        self.conv0 = nn.Conv2d(2, 1, kernel, padding=p1, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 2)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.gn = nn.GroupNorm(16, channel)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # spatial1 attention
+        b1, c1, h, w = x_0.shape
+        avg_out = torch.mean(x_0, dim=1, keepdim=True)
+        max_out, _ = torch.max(x_0, dim=1, keepdim=True)
+        y = torch.cat([avg_out, max_out], dim=1)
+        xn = self.conv0(y).expand([b1, c1, h, w])
+        xn = self.sig(xn)
+        xn = x_0 * xn
 
 
+        # spatial2 attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela11(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=32, kernel=7):
+        super(sa_ela11, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+
+        p1 = 3 if kernel== 7 else 1
+        self.conv0 = nn.Conv2d(2, 1, kernel, padding=p1, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 2)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.gn = nn.GroupNorm(16, channel)
+
+    @staticmethod
+    def channel_shuffle(x, groups):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b, groups, -1, h, w)
+        x = x.permute(0, 2, 1, 3, 4)
+
+        # flatten
+        x = x.reshape(b, -1, h, w)
+
+        return x
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # spatial1 attention
+        b1, c1, h, w = x_0.shape
+        avg_out = torch.mean(x_0, dim=1, keepdim=True)
+        max_out, _ = torch.max(x_0, dim=1, keepdim=True)
+        y = torch.cat([avg_out, max_out], dim=1)
+        xn = self.conv0(y).expand([b1, c1, h, w])
+        xn = self.sig(xn)
+        xn = x_0 * xn
+
+        # spatial2 attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        out = self.channel_shuffle(out, 2)
+
+        return out
+
+class sa_ela20(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=32, kernel=7):
+        super(sa_ela20, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        p2 = ks // 2
+        c = channel // (groups * 2)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.gn = nn.GroupNorm(16, channel)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # spatial2 attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([x_0, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela21(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=32, kernel=7):
+        super(sa_ela21, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        p2 = ks // 2
+        c = channel // (groups * 2)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.gn = nn.GroupNorm(32, c)
+    @staticmethod
+    def channel_shuffle(x, groups):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b, groups, -1, h, w)
+        x = x.permute(0, 2, 1, 3, 4)
+
+        # flatten
+        x = x.reshape(b, -1, h, w)
+
+        return x
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        x_0, x_1 = x.chunk(2, dim=1)
+
+        # spatial2 attention
+
+        b2, c2, h, w = x_1.shape
+
+        x_h = torch.mean(x_1, dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(x_1, dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = x_1 * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([x_0, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        out = self.channel_shuffle(out, 2)
+
+        return out
+
+class sa_ela220(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=16):
+        super(sa_ela220, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        p1 = 3 if ks== 7 else 1
+        self.conv0 = nn.Conv2d(2, 1, ks, padding=p1, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 4)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.gn = nn.GroupNorm(16, channel)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        y = torch.chunk(x, 4, dim=1)
+
+        # spatial0 attention
+
+        b2, c2, h, w = y[1].shape
+
+        x_h = torch.mean(y[1], dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(y[1], dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = y[1] * x_h * x_w
+
+        # spatial1 attention
+        b1, c1, h, w = y[3].shape
+        avg_out = torch.mean(y[3], dim=1, keepdim=True)
+        max_out, _ = torch.max(y[3], dim=1, keepdim=True)
+        yn = torch.cat([avg_out, max_out], dim=1)
+        xn = self.conv0(yn).expand([b1, c1, h, w])
+        xn = self.sig(xn)
+        xn = y[3] * xn
+
+        # concatenate along channel axis
+        out = torch.cat([y[0], xs, y[2], xn], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela23(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=16, gamma=2, b=1):
+        super(sa_ela23, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv0 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 4)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        p1 = 3 if ks== 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, ks, padding=p1, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        y = torch.chunk(x, 4, dim=1)
+
+        # channel attention
+        b1, c1, h, w = y[1].shape
+
+        xc = self.avg_pool(y[1]).view([b1, 1, c1])
+        xc = self.conv0(xc)
+        xc = self.sig(xc).view([b1, c1, 1, 1])
+        xc = y[1] * xc
+
+        # spatial0 attention
+        b2, c2, h, w = y[2].shape
+
+        x_h = torch.mean(y[2], dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(y[2], dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = y[2] * x_h * x_w
+
+        # spatial1 attention
+        b1, c1, h, w = y[3].shape
+        avg_out = torch.mean(y[3], dim=1, keepdim=True)
+        max_out, _ = torch.max(y[3], dim=1, keepdim=True)
+        yn = torch.cat([avg_out, max_out], dim=1)
+        xn = self.conv2(yn).expand([b1, c1, h, w])
+        xn = self.sig(xn)
+        xn = y[3] * xn
+
+        # concatenate along channel axis
+        out = torch.cat([y[0], xc, xs, xn], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela232(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=16, gamma=2, b=1):
+        super(sa_ela232, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv0 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 4)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        p1 = 3 if ks== 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, ks, padding=p1, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        y = torch.chunk(x, 4, dim=1)
+
+        # channel attention
+        b1, c1, h, w = y[1].shape
+
+        xc = self.avg_pool(y[1]).view([b1, 1, c1])
+        xc = self.conv0(xc)
+        xc = self.sig(xc).view([b1, c1, 1, 1])
+        xc = y[1] * xc
+
+        # spatial0 attention
+        b2, c2, h, w = y[2].shape
+
+        x_h = torch.mean(y[2], dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(y[2], dim=2, keepdim=True).view(b2, c2, w)
+
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+
+        xs = y[2] * x_h * x_w
+
+        # spatial1 attention
+        b1, c1, h, w = y[3].shape
+        avg_out = torch.mean(y[3], dim=1, keepdim=True)
+        max_out, _ = torch.max(y[3], dim=1, keepdim=True)
+        yn = torch.cat([avg_out, max_out], dim=1)
+        xn = self.conv2(yn).expand([b1, c1, h, w])
+        xn = self.sig(xn)
+        xn = y[3] * xn
+
+        # concatenate along channel axis
+        out = torch.cat([y[0], xc, xn, xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class sa_ela233(nn.Module):
+    """Constructs a Channel Spatial Group module.
+        Args:
+            k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, ks=7, groups=32, gamma=2, b=1):
+        super(sa_ela233, self).__init__()
+        # from torch.nn.parameter import Parameter
+
+        self.groups = groups
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma)) + 2
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv0 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+        p2 = ks // 2
+        c = channel // (groups * 4)
+        self.conv1 = nn.Conv1d(c, c, kernel_size=ks, padding=p2, groups=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        x = x.reshape(b * self.groups, -1, h, w)
+        y = torch.chunk(x, 4, dim=1)
+
+        # channel attention
+        b1, c1, h, w = y[1].shape
+
+        xc = self.avg_pool(y[1]).view([b1, 1, c1])
+        xc = self.conv0(xc)
+        xc = self.sig(xc).view([b1, c1, 1, 1])
+        xc = y[1] * xc
+
+        # spatial0 attention
+        b2, c2, h, w = y[3].shape
+
+        x_h = torch.mean(y[3], dim=3, keepdim=True).view(b2, c2, h)
+        x_w = torch.mean(y[3], dim=2, keepdim=True).view(b2, c2, w)
+        x_h = self.sig(self.conv1(x_h)).view(b2, c2, h, 1)
+        x_w = self.sig(self.conv1(x_w)).view(b2, c2, 1, w)
+        xs = y[3] * x_h * x_w
+
+        # concatenate along channel axis
+        out = torch.cat([y[0], xc, y[2], xs], dim=1)
+        out = out.reshape(b, -1, h, w)
+
+        return out
+
+class SE_SA(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=7):
+        super(SE_SA, self).__init__()
+        mch = max(8, channel//reduction)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+
+        self.conv3 = nn.Conv2d(in_channels=channel, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel_size, padding=padding2, bias=False)
+        self.bn = nn.BatchNorm2d(channel)
+
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        x_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        x_w = self.sig(self.conv11(x_w))
+        F_ca = x_h * x_w   # b, c, h, w
+
+        F_se = self.conv11(self.relu1(self.conv10(self.avg_pool(x) + self.max_pool(x))))
+        F = F_ca + F_se
+
+        return x * F
+
+
+
+class CA_SA41(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=3):
+        super(CA_SA41, self).__init__()
+        mch = max(8, channel//reduction)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+
+        self.conv3 = nn.Conv2d(in_channels=channel, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+
+        self.bn = nn.BatchNorm2d(channel)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        x_h = self.conv11(x_h.permute(0, 1, 3, 2))
+        x_w = self.conv11(x_w)
+        F1 = x_h * x_w   # b, c, h, w
+
+        F2 = torch.mean(x, dim=1, keepdim=True)
+        F2 = self.conv2(F2)  # b,1,h,w
+
+        F = self.sig(F1 + F2)
+
+        return x * F
+
+class CA_SA42(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=3):
+        super(CA_SA42, self).__init__()
+        mch = max(8,channel//reduction)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+
+        self.conv3 = nn.Conv2d(in_channels=channel, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+
+        self.bn = nn.BatchNorm2d(channel)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        x_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        x_w = self.sig(self.conv11(x_w))
+        F1 = x_h * x_w   # b, c, h, w
+
+        F2 = torch.mean(x, dim=1, keepdim=True)
+        F2 = self.sig(self.conv2(F2))  # b,1,h,w
+
+        F = F1 * F2
+
+        return x * F
+
+class CA_SA5(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=3):
+        super(CA_SA5, self).__init__()
+
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=channel // reduction, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(channel // reduction)
+        self.conv11 = nn.Conv2d(in_channels=channel // reduction, out_channels=channel, kernel_size=1, stride=1, bias=False)
+
+        self.conv3 = nn.Conv2d(in_channels=channel, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding, bias=False)
+        self.bn = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        x_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        x_w = self.sig(self.conv11(x_w))
+        F1 = x_h * x_w   # b, c, h, w
+
+        F2 = torch.mean(x, dim=1, keepdim=True)
+        F2 = self.sig(self.bn(self.conv2(F2)))  # b,1,h,w
+
+        F = F1 + F2
+
+        return x * F
+
+class CB_CA(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(CB_CA, self).__init__()
+        # CA
+        mch = max(8,channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+        self.relu1 = nn.ReLU()
+
+        # SA
+        # assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        # padding2 = 3 if kernel_size == 7 else 1
+        # self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = F * F_ca
+
+        return out
+
+class CB_CA_SA2(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(CB_CA_SA2, self).__init__()
+        # CA
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=channel // ratio, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(channel // ratio)
+        self.conv11 = nn.Conv2d(in_channels=channel // ratio, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.sig(self.conv2(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = F_sa + F_ca
+
+        F = F * out
+
+        return F
+
+class CB_CA_SA3(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(CB_CA_SA3, self).__init__()
+        # CA
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=channel // ratio, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(channel // ratio)
+        self.conv11 = nn.Conv2d(in_channels=channel // ratio, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F_sa = torch.cat([avg_out, max_out], dim=1)
+        F_sa = self.sig(self.conv2(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = F_sa + F_ca
+
+        F = F * out
+
+        return F
+
+class CB_CA_SA4(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(CB_CA_SA4, self).__init__()
+        # CA
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=channel // ratio, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(channel // ratio)
+        self.conv11 = nn.Conv2d(in_channels=channel // ratio, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F_sa = avg_out + max_out
+        F_sa = self.sig(self.conv2(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = F_sa + F_ca
+
+        F = F * out
+
+        return F
+
+class SE_CA_SA(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(SE_CA_SA, self).__init__()
+        # CA
+        mch = max(8,channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.sig(self.conv2(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = F_sa + F_ca
+
+        F = F * out
+
+        return F
+
+class SE_CA_SA2(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(SE_CA_SA2, self).__init__()
+        # CA
+        mch = max(8,channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # CB
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        avg_out = self.conv11(self.relu(self.conv10(self.avg_pool(x))))
+        max_out = self.conv11(self.relu(self.conv10(self.max_pool(x))))
+        F_cb = self.sig(avg_out + max_out)   # b, c, 1, 1
+        F = x * F_cb
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.conv2(F_sa)  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.conv11(x_h.permute(0, 1, 3, 2))
+        s_w = self.conv11(x_w)
+        F_ca = s_h * s_w  # b, c, h, w
+
+        out = self.sig(F_sa + F_ca)
+
+        F = F * out
+
+        return F
+
+class EC_CA_SA(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(EC_CA_SA, self).__init__()
+        # CA
+        mch = max(8, channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        gamma = 2
+        b = 1
+        ks = int(abs((math.log(channel, 2) + b) / gamma))
+        ks = ks if ks % 2 else ks + 1
+
+        padding1 = ks // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv20 = nn.Conv1d(1, 1, kernel_size=ks, padding=padding1, bias=False)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv21 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+        # self.conv3 = nn.Conv2d(channel, channel, 3, padding=0, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F_ch = self.avg(x).view([b, 1, c])
+        F_ch = self.conv20(F_ch).view([b, c, 1, 1])  # b,c,1,1
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.conv21(F_sa)  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.conv11(x_h.permute(0, 1, 3, 2))
+        s_w = self.conv11(x_w)
+        F_ca = s_h * s_w  # b, c, h, w
+        F = self.sig(F_ch + F_ca + F_sa)
+
+        out = x * F
+
+        return out
+
+class EC_CA_SA2(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(EC_CA_SA2, self).__init__()
+        # CA
+        mch = max(8, channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        gamma = 2
+        b = 1
+        ks = int(abs((math.log(channel, 2) + b) / gamma))
+        ks = ks if ks % 2 else ks + 1
+
+        padding1 = ks // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv20 = nn.Conv1d(1, 1, kernel_size=ks, padding=padding1, bias=False)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv21 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+        # self.conv3 = nn.Conv2d(channel, channel, 3, padding=0, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F_ch = self.avg(x).view([b, 1, c])
+        F_ch = self.conv20(F_ch).view([b, c, 1, 1])  # b,c,1,1
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.sig(self.conv21(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+        F = F_ch + F_ca + F_sa
+
+        out = x * F
+
+        return out
+
+class EC_CA_SA3(nn.Module):
+    def __init__(self, channel, ratio=16, kernel_size=3):
+        super(EC_CA_SA3, self).__init__()
+        # CA
+        mch = max(8, channel//ratio)
+        self.conv10 = nn.Conv2d(in_channels=channel, out_channels=mch, kernel_size=1, stride=1, bias=False)
+        self.relu = nn.ReLU()
+        self.bn10 = nn.BatchNorm2d(mch)
+        self.conv11 = nn.Conv2d(in_channels=mch, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        gamma = 2
+        b = 1
+        ks = int(abs((math.log(channel, 2) + b) / gamma))
+        ks = ks if ks % 2 else ks + 1
+
+        padding1 = ks // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv20 = nn.Conv1d(1, 1, kernel_size=ks, padding=padding1, bias=False)
+        # 利用1x1卷积代替全连接
+
+        # SA
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding2 = 3 if kernel_size == 7 else 1
+        self.conv21 = nn.Conv2d(1, 1, kernel_size, padding=padding2, bias=False)
+        # self.conv3 = nn.Conv2d(channel, channel, 3, padding=0, bias=False)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F_ch = self.avg(x).view([b, 1, c])
+        F_ch = self.conv20(F_ch).view([b, c, 1, 1])  # b,c,1,1
+        F = x * F_ch
+
+        F_sa = torch.mean(x, dim=1, keepdim=True)
+        F_sa = self.sig(self.conv21(F_sa))  # b,1,h,w
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+        x_cat_conv_relu = self.relu(self.bn10(self.conv10(torch.cat((x_h, x_w), 3))))
+        x_h, x_w = x_cat_conv_relu.split([h, w], 3)
+        s_h = self.sig(self.conv11(x_h.permute(0, 1, 3, 2)))
+        s_w = self.sig(self.conv11(x_w))
+        F_ca = s_h * s_w  # b, c, h, w
+        F_ca_sa =  F_ca + F_sa
+
+        out = F * F_ca_sa
+
+        return out
 
 class eac(nn.Module):
     def __init__(self, in_planes, gamma=2, b=1):
@@ -486,6 +1936,475 @@ class eac_t(nn.Module):
         return x * y
 
 
+class A2M(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(A2M, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.max = nn.AdaptiveMaxPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.conv2 = nn.Conv1d(1, 1, kernel_size=2 + kernel_size, padding = 1 + padding,  bias=False)
+        # self.conv3 = nn.Conv1d(1, 1, kernel_size=kernel_size+2, padding = padding+1,  bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        # max0 = self.max(x).view([b, 1, c])
+
+        output0 =  self.sig(self.conv1(avg0))
+        output0 = self.conv2(output0)
+        y0 = self.sig(output0).view([b, c, 1, 1])
+        out = x * y0
+        output1 = self.conv1(avg0)
+        # output1 = self.conv2(output1)
+        y1 = self.sig(output1).view([b, c, 1, 1])
+        out = out * y1
+        return out
+class O2S(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(O2S, self).__init__()
+        # 计算卷积核大小
+        # channel = int((channel*4)/3)
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        # self.max = nn.AdaptiveMaxPool2d(1)
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=2+kernel_size, padding=1+padding,bias=False)
+        # self.conv4 = nn.Conv1d( 1, 1, kernel_size=3*kernel_size, padding=6*padding, groups=1, dilation=4,bias=False)
+        self.sig = nn.Sigmoid()
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        output0 = self.conv1(avg0)
+        output0 = self.sig(output0)
+        output1 = self.conv2(output0)
+        y = self.sig(output1).view([b, c, 1, 1])
+        out = x * y
+        return out
+
+class O2s_sp(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(O2s_sp, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        # self.max = nn.AdaptiveMaxPool2d(1)
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size+0, padding=padding+0, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=kernel_size+2, padding=padding+1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.sm = nn.Softmax()
+        self.sp = nn.Softplus()
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        output0 = self.conv1(avg0)
+        output0 = self.sig(output0)
+        output1 = self.conv2(output0)
+        y = 0.85 * self.sp(output1).view([b, c, 1, 1])
+        out = x * y
+        return out
+
+class O2s_sp_t(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(O2s_sp_t, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        # self.max = nn.AdaptiveMaxPool2d(1)
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size+0, padding=padding+0, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=kernel_size+2, padding=padding+1, bias=False)
+        self.sig = nn.Sigmoid()
+        # self.sm = nn.Softmax()
+        self.sp = nn.Softplus()
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        output0 = self.conv1(avg0)
+        output0 = self.sig(output0)
+        val1= [item.cpu().detach().numpy() for item in output0[0][0]]
+        for i in val1:
+            f = open(nano_sps1410,'a')
+            a = "%f,"%(i)
+            f.write(str(a),)
+            f.close
+        output1 = self.conv2(output0)
+        output1 = self.conv2(output0)
+        y = 0.85 * self.sp(output1)
+        val2= [item.cpu().detach().numpy() for item in y[0][0]]
+        for i in val2:
+            f = open(nano_sps2410,'a')
+            a = "%f,"%(i)
+            f.write(str(a),)
+            f.close
+
+        y = y.view([b, c, 1, 1])
+        out = x * y
+        return out
+
+
+class EC_SA(nn.Module):
+    def __init__(self, channel, ratio=8, kernel_size=7):
+        super(EC_SA, self).__init__()
+        self.channelattention = eac(channel)
+        self.spatialattention = SpatialAttention(kernel_size=kernel_size)
+
+    def forward(self, x):
+        x = self.channelattention(x)
+        x = x * self.spatialattention(x)
+
+        return x
+
+class EC_CA2(nn.Module):
+    def __init__(self, channel):
+        super(EC_CA2, self).__init__()
+        self.channelattention = eac(channel)
+        self.spatialattention = CA_Block(channel)
+
+    def forward(self, x):
+        x = self.spatialattention(x)
+        x = self.channelattention(x)
+
+        return x
+
+class EC_CA3(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(EC_CA3, self).__init__()
+
+        self.conv11 = nn.Conv2d(in_channels=channel, out_channels=channel // reduction, kernel_size=1, stride=1,
+                                  bias=False)
+        self.relu = nn.ReLU()
+        self.bn = nn.BatchNorm2d(channel // reduction)
+        self.conv12 = nn.Conv2d(in_channels=channel // reduction, out_channels=channel, kernel_size=1, stride=1,
+                             bias=False)
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        x_h = torch.mean(x, dim=3, keepdim=True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim=2, keepdim=True)
+
+        x_cat = self.relu(self.bn(self.conv11(torch.cat((x_h, x_w), 3))))
+        x_cat_h, x_cat_w = x_cat.split([h, w], 3)
+
+        x_h = self.conv12(x_cat_h.permute(0, 1, 3, 2))
+        x_w = self.conv12(x_cat_w)
+        F1 = x_h.expand_as(x) * x_w.expand_as(x)
+
+        F2 = self.avg(x).view([b, 1, c])
+        F2 = self.conv(F2).view([b, c, 1, 1])  # b,c,1,1
+        F = self.sig(F1 + F2)
+
+        return x * F
+
+class EC_ELA1(nn.Module):
+    def __init__(self, channel, ks=7, gamma=2, b=1):
+        super(EC_ELA1, self).__init__()
+
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding1, bias=False)
+
+        p = ks // 2
+        self.conv2 = nn.Conv1d(channel, channel, kernel_size=ks, padding=p, groups=channel//8, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F1 = self.avg(x).view([b, 1, c])
+        F1= self.conv1(F1).view([b, c, 1, 1])  # b,c,1,1
+
+        x_h = torch.mean(x, dim=3, keepdim=True).view(b, c, h)
+        x_w = torch.mean(x, dim=2, keepdim=True).view(b, c, w)
+        x_h = self.conv2(x_h).view(b, c, h, 1)
+        x_w = self.conv2(x_w).view(b, c, 1, w)
+        F2 = x_h * x_w
+
+        F = self.sig(F1 * F2)
+
+        return x * F
+
+class ELA_SA1(nn.Module):
+    def __init__(self, channel, ks=7):
+        super(ELA_SA1, self).__init__()
+
+        self.conv1 = nn.Conv2d(1, 1, kernel_size=ks, padding=ks//2, bias=False)
+
+        self.conv2 = nn.Conv1d(channel, channel, kernel_size=ks, padding=ks//2, groups=channel, bias=False)
+        self.sig = nn.Sigmoid()
+
+    def forward(self, x):
+
+        b, c, h, w = x.size()
+        x_h = torch.mean(x, dim=3, keepdim=True).view(b, c, h)
+        x_w = torch.mean(x, dim=2, keepdim=True).view(b, c, w)
+        x_h = self.conv2(x_h).view(b, c, h, 1)
+        x_w = self.conv2(x_w).view(b, c, 1, w)
+        F1 = x_h * x_w
+
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F2 = self.conv1(max_out)
+
+        F = self.sig(F1 + F2)
+
+        return x * F
+
+class EC_SA33(nn.Module):
+    def __init__(self, channel, kernel=7):
+        super(EC_SA33, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        padding2 = 3 if kernel== 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel, padding=padding2, bias=False)
+        self.bn = nn.BatchNorm2d(channel)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F1 = self.avg(x).view([b, 1, c])
+        F1= self.conv1(F1).view([b, c, 1, 1])  # b,c,1,1
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F2 = torch.cat([avg_out, max_out], dim=1)
+        F2 = self.conv2(F2).expand([b, c, h, w ]) # F2 = self.conv2(F2).expand_as(x), F2 = self.conv2(F2).expand([-1, c, -1, -1 ])
+        F2 = self.bn(F2)
+        F = self.sig(F1 + F2)
+
+        return x * F
+
+class EC_SA39(nn.Module):
+    def __init__(self, channel, kernel=7):
+        super(EC_SA39, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # padding2 = 3 if kernel== 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel_size=1, padding=0, bias=False)
+        self.conv3 = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F1 = self.avg(x).view([b, 1, c])
+        F1= self.conv1(F1).view([b, c, 1, 1])  # b,c,1,1
+        F1 = self.sig(F1)
+        F = x * F1
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F2 = torch.cat([avg_out, max_out], dim=1)
+        F2 = self.conv2(F2).view([b, h, w ])
+        # print(F2.shape)
+        F2_h = nn.Conv1d(in_channels=h, out_channels=h, kernel_size=3, padding=1, bias=False).cuda()(F2).view([b, 1, h, w])
+        F2_w = nn.Conv1d(in_channels=w, out_channels=w, kernel_size=3, padding=1, bias=False).cuda()(F2.permute(0, 2, 1))
+        F2_w = (F2_w.permute(0,2,1)).view([b,1,h,w])
+        F2 = F2_h + F2_w
+        F2 = self.bn(F2)
+        F2 = self.sig(F2)
+        F = F * F2
+
+        return  F
+
+class EC_SA41(nn.Module):
+    def __init__(self, channel, kernel=7):
+        super(EC_SA41, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # padding2 = 3 if kernel== 7 else 1
+        # self.conv2 = nn.Conv2d(2, 1, kernel_size=1, padding=0, bias=False)
+        self.conv3 = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F1 = self.avg(x).view([b, 1, c])
+        F1= self.conv1(F1).view([b, c, 1, 1])  # b,c,1,1
+        F1 = self.sig(F1)
+        F = x * F1
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        # max_out, _ = torch.max(x, dim=1, keepdim=True)
+        # F2 = torch.cat([avg_out, max_out], dim=1)
+        F2 = avg_out.view([b, h, w])
+        # print(F2.shape)
+        F2_h = nn.Conv1d(in_channels=h, out_channels=h, kernel_size=3, padding=1, bias=False).cuda()(F2).view([b, 1, h, w])
+        F2_w = nn.Conv1d(in_channels=w, out_channels=w, kernel_size=3, padding=1, bias=False).cuda()(F2.permute(0, 2, 1))
+        F2_w = (F2_w.permute(0,2,1)).view([b,1,h,w])
+        F2 = F2_h + F2_w
+        F2 = self.bn(F2)
+        F2 = self.sig(F2)
+        F = F * F2
+
+        return  F
+
+class EC_SA42(nn.Module):
+    def __init__(self, channel):
+        super(EC_SA42, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=padding1, bias=False)
+        self.sig = nn.Sigmoid()
+
+        # padding2 = 3 if kernel== 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel_size=1, padding=0, bias=False)
+        self.conv3 = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+        # self.bn = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        F1 = self.avg(x).view([b, 1, c])
+        F1= self.conv1(F1).view([b, c, 1, 1])  # b,c,1,1
+        F1 = self.sig(F1)
+        F = x * F1
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F2 = torch.cat([avg_out, max_out], dim=1)
+        F2 = self.conv2(F2).view([b, h, w])
+        # print(F2.shape)
+        F2_h = nn.Conv1d(in_channels=h, out_channels=h, kernel_size=3, padding=1, bias=False).cuda()(F2).view([b, 1, h, w])
+        F2_w = nn.Conv1d(in_channels=w, out_channels=w, kernel_size=3, padding=1, bias=False).cuda()(F2.permute(0, 2, 1))
+        F2_w = (F2_w.permute(0,2,1)).view([b,1,h,w])
+        F2 = F2_h + F2_w
+        # F2 = self.bn(F2)
+        F2 = self.sig(F2)
+        F = F * F2
+
+        return  F
+
+class EC_m_SA(nn.Module):
+    def __init__(self, channel, kernel=7):
+        super(EC_m_SA, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size , padding=padding1 , bias=False)
+        self.sig = nn.Sigmoid()
+
+        padding2 = 3 if kernel == 7 else 1
+        self.conv2 = nn.Conv2d(2, 1, kernel, padding=padding2, bias=False)
+        self.bn = nn.BatchNorm2d(1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        y = self.avg(x).view([b, 1, c])
+        y = self.conv1(y)
+        F1 = self.sig(y).view([b, c, 1, 1])
+        F = x * F1
+
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        F2 = torch.cat([avg_out, max_out], dim=1)
+        F2 = self.sig(self.bn(self.conv2(F2)))
+
+        F = x * F
+
+        return F
+
+class EC_SA3(nn.Module):
+    def __init__(self, channel, kernel=7):
+        super(EC_SA3, self).__init__()
+
+        gamma = 2
+        b = 1
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+
+        padding1 = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d(1, 1, kernel_size=kernel_size , padding=padding1 , bias=False)
+        self.sig = nn.Sigmoid()
+
+        padding2 = 3 if kernel == 7 else 1
+        self.conv2 = nn.Conv2d(1, 1, kernel, padding=padding2, bias=False)
+        self.bn = nn.BatchNorm2d(channel)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        y = self.avg(x).view([b, 1, c])
+        F1 = self.conv1(y).view([b, c, 1, 1])
+
+        F2 = torch.mean(x, dim=1, keepdim=True)
+        F2 = self.bn(self.conv2(F2).expand([b,c,h,w]))
+
+        F = self.sig(F1 + F2)
+
+        return x * F
+
 class SKnet(nn.Module):
     def __init__(self, features, WH=1, M=2, G=32, r=16, stride=1, L=32):
         super(SKnet, self).__init__()
@@ -529,3 +2448,285 @@ class SKnet(nn.Module):
         attention_vectors = attention_vectors.unsqueeze(-1).unsqueeze(-1)
         fea_v = (feas * attention_vectors).sum(dim=1)
         return fea_v
+
+# adaptive
+class O2Ss(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(O2Ss, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        # self.max = nn.AdaptiveMaxPool2d(1)
+        # self.alpha = alpha
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size+0, padding=padding+0, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=kernel_size+2, padding=padding+1, bias=False)
+        # self.conv4 = nn.Conv1d( 1, 1, kernel_size=3*kernel_size, padding=6*padding, groups=1, dilation=4,bias=False)
+        self.sig = nn.Sigmoid()
+        # self.sm = nn.Softmax()
+        # self.sp = nn.Softplus()
+        self.ss30 = ms30()
+        self.ss40 = ms40()
+        self.ss20 = ms20()
+        self.ss15 = ms15()
+        self.ss075 = ms075()
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        input0 = avg0
+        output0 = self.conv1(input0)
+
+        if c >= 512:
+            output0 = self.sig(output0)
+            output1 = self.conv2(output0)
+            y = self.sig(output1).view([b, c, 1, 1])
+        elif 512> c >= 384:
+            output0 = self.sig(output0)
+            output1 = self.conv2(output0)
+            y = self.ss15(output1).view([b, c, 1, 1])
+        elif 384> c >= 256:
+            output0 = self.sig(output0)
+            output1 = self.conv2(output0)
+            y = self.ss20(output1).view([b, c, 1, 1])
+        elif 256> c >= 128:
+            output0 = self.sig(output0)
+            output1 = self.conv2(output0)
+            y = self.ss30(output1).view([b, c, 1, 1])
+        else:
+            output0 = self.sig(output0)
+            output1 = self.conv2(output0)
+            y = self.ss40(output1).view([b, c, 1, 1])
+
+        out = x * y
+        return out
+
+from .attention_temp import Avg_max_channel_attention as ba
+from .sea_att import Conv2d_BN, SqueezeAxialPositionalEmbedding, h_sigmoid
+# import torch.nn.functional as F
+class Sea_Attention(torch.nn.Module):
+    def __init__(self, dim, key_dim=4, num_heads=2,
+                 attn_ratio=2,
+                 activation=nn.ReLU,
+                 norm_cfg=dict(type='BN', requires_grad=True), ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.scale = key_dim ** -0.5
+        self.key_dim = key_dim
+        self.nh_kd = nh_kd = key_dim * num_heads  # num_head key_dim
+        self.d = int(attn_ratio * key_dim)
+        self.dh = int(attn_ratio * key_dim) * num_heads
+        self.attn_ratio = attn_ratio
+
+        self.to_q = Conv2d_BN(dim, nh_kd, 1, norm_cfg=norm_cfg)
+        self.to_k = Conv2d_BN(dim, nh_kd, 1, norm_cfg=norm_cfg)
+        self.to_v = Conv2d_BN(dim, self.dh, 1, norm_cfg=norm_cfg)
+        
+        self.proj = torch.nn.Sequential(activation(), Conv2d_BN(
+            self.dh, dim, bn_weight_init=0, norm_cfg=norm_cfg))
+        self.proj_encode_row = torch.nn.Sequential(activation(), Conv2d_BN(
+            self.dh, self.dh, bn_weight_init=0, norm_cfg=norm_cfg))
+        self.pos_emb_rowq = SqueezeAxialPositionalEmbedding(nh_kd, 16)
+        self.pos_emb_rowk = SqueezeAxialPositionalEmbedding(nh_kd, 16)
+        self.proj_encode_column = torch.nn.Sequential(activation(), Conv2d_BN(
+            self.dh, self.dh, bn_weight_init=0, norm_cfg=norm_cfg))
+        self.pos_emb_columnq = SqueezeAxialPositionalEmbedding(nh_kd, 16)
+        self.pos_emb_columnk = SqueezeAxialPositionalEmbedding(nh_kd, 16)
+        
+        self.dwconv = Conv2d_BN(2*self.dh, 2*self.dh, ks=3, stride=1, pad=1, dilation=1,
+                 groups=2*self.dh, norm_cfg=norm_cfg)    #groups=2*self.dh
+        self.act = activation()
+        self.pwconv = Conv2d_BN(2*self.dh, dim, ks=1, norm_cfg=norm_cfg)
+        self.sigmoid = h_sigmoid()
+    def forward(self, x):  # x (B,N,C)
+        B, C, H, W = x.shape
+
+        q = self.to_q(x)
+        k = self.to_k(x)
+        v = self.to_v(x)
+        
+        # detail enhance
+        qkv = torch.cat([q,k,v],dim=1)
+        qkv = self.act(self.dwconv(qkv))
+        qkv = self.pwconv(qkv)
+
+        # squeeze axial attention
+        ## squeeze row
+        qrow = self.pos_emb_rowq(q.mean(-1)).reshape(B, self.num_heads, -1, H).permute(0, 1, 3, 2)
+        krow = self.pos_emb_rowk(k.mean(-1)).reshape(B, self.num_heads, -1, H)
+        vrow = v.mean(-1).reshape(B, self.num_heads, -1, H).permute(0, 1, 3, 2)
+        
+        attn_row = torch.matmul(qrow, krow) * self.scale
+        attn_row = attn_row.softmax(dim=-1)
+        xx_row = torch.matmul(attn_row, vrow)  # B nH H C
+        xx_row = self.proj_encode_row(xx_row.permute(0, 1, 3, 2).reshape(B, self.dh, H, 1))
+
+        
+        ## squeeze column
+        qcolumn = self.pos_emb_columnq(q.mean(-2)).reshape(B, self.num_heads, -1, W).permute(0, 1, 3, 2)
+        kcolumn = self.pos_emb_columnk(k.mean(-2)).reshape(B, self.num_heads, -1, W)
+        vcolumn = v.mean(-2).reshape(B, self.num_heads, -1, W).permute(0, 1, 3, 2)
+        
+        attn_column = torch.matmul(qcolumn, kcolumn) * self.scale
+        attn_column = attn_column.softmax(dim=-1)
+        xx_column = torch.matmul(attn_column, vcolumn)  # B nH W C
+        xx_column = self.proj_encode_column(xx_column.permute(0, 1, 3, 2).reshape(B, self.dh, 1, W))
+
+        xx = xx_row.add(xx_column)
+        xx = v.add(xx)
+        xx = self.proj(xx)
+        xx = self.sigmoid(xx) * qkv
+        return xx
+
+import torch.nn.functional as F
+class StripAtten(nn.Module):
+    def __init__(self, dim, kernel=5, group=2, H=True) -> None:
+        super(StripAtten, self).__init__()
+        self.k = kernel
+        pad = kernel // 2
+        self.kernel = (1, kernel) if H else (kernel, 1)
+        self.padding = (kernel // 2, 1) if H else (1, kernel // 2)
+
+        self.group = group
+        self.pad = nn.ReflectionPad2d((pad, pad, 0, 0)) if H else nn.ReflectionPad2d((0, 0, pad, pad))
+        self.conv = nn.Conv2d(dim, group * kernel, kernel_size=1, stride=1, bias=False)
+        self.ap = nn.AdaptiveAvgPool2d((1, 1))
+        self.filter_act = nn.Sigmoid()
+
+    def forward(self, x):
+        filter = self.ap(x)
+        filter = self.conv(filter)
+        n, c, h, w = x.shape
+        x = F.unfold(self.pad(x), kernel_size=self.kernel).reshape(n, self.group, c // self.group, self.k, h * w)
+
+        n, c1, p, q = filter.shape
+        filter = filter.reshape(n, c1 // self.k, self.k, p * q).unsqueeze(2)
+        filter = self.filter_act(filter)
+
+        out = torch.sum(x * filter, dim=3).reshape(n, c, h, w)
+        return out
+
+from .attention_temp import cubic_attention
+
+class NonLocalBlock(nn.Module):
+    def __init__(self, in_channels, inter_channels=None):
+        super(NonLocalBlock, self).__init__()
+        self.in_channels = in_channels
+        self.inter_channels = inter_channels or in_channels // 2
+
+        # 定义 g、theta、phi、out 四个卷积层
+        self.g = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
+        self.theta = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
+        self.phi = nn.Conv2d(in_channels=self.in_channels, out_channels=self.inter_channels, kernel_size=1, stride=1, padding=0)
+        self.out = nn.Conv2d(in_channels=self.inter_channels, out_channels=self.in_channels, kernel_size=1, stride=1, padding=0)
+
+        # 定义 softmax 层，用于将 f_ij 进行归一化
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+
+        # 计算 g(x)
+        g_x = self.g(x).view(batch_size, self.inter_channels, -1)
+        g_x = g_x.permute(0, 2, 1)
+
+        # 计算 theta(x)
+        theta_x = self.theta(x).view(batch_size, self.inter_channels, -1)
+        theta_x = theta_x.permute(0, 2, 1)
+
+        # 计算 phi(x)
+        phi_x = self.phi(x).view(batch_size, self.inter_channels, -1)
+
+        # 计算 f_ij
+        f = torch.matmul(theta_x, phi_x)
+
+        # 对 f_ij 进行归一化
+        f_div_C = self.softmax(f)
+
+        # 计算 y_i
+        y = torch.matmul(f_div_C, g_x)
+        y = y.permute(0, 2, 1).contiguous()
+        y = y.view(batch_size, self.inter_channels, *x.size()[2:])
+
+        # 计算 z_i
+        y = self.out(y)
+        z = y + x
+
+        return z
+#
+class O2Sr_sp(nn.Module):
+    # def __init__(self, channel, gamma=2, b=1):
+    #     super(O2Sr_sp, self).__init__()
+    #     # 计算卷积核大小
+    #     kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+    #     kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+    def __init__(self, channel, gamma=1.6, b=1.2):
+        super(O2Sr_sp, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel+100) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        # self.max = nn.AdaptiveMaxPool2d(1)
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=2+kernel_size, padding=1+padding, bias=False)
+        # self.conv4 = nn.Conv1d( 1, 1, kernel_size=3*kernel_size, padding=6*padding, groups=1, dilation=4,bias=False)
+        self.sig = nn.Sigmoid()
+        self.sp = nn.Softplus()
+        # self.a = 1
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        output0 = self.conv1(avg0)
+        output0 = self.sig(output0)
+        output1 = self.conv2(output0)
+        if c<=64:
+            y = self.sp(output1).view([b, c, 1, 1])
+        else:
+            y = self.sig(output1).view([b, c, 1, 1])
+        # y = self.sig(output1).view([b, c, 1, 1])
+        out = x * y
+        return out
+# test weights
+class O2S_t(nn.Module):
+    def __init__(self, channel, gamma=2, b=1):
+        super(O2S_t, self).__init__()
+        # 计算卷积核大小
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        # 计算padding
+        padding = kernel_size // 2
+        self.avg = nn.AdaptiveAvgPool2d(1)
+        self.conv1 = nn.Conv1d( 1, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.conv2 = nn.Conv1d( 1, 1, kernel_size=2+kernel_size, padding=1+padding,bias=False)
+        self.sig = nn.Sigmoid()
+        # self.sp = nn.Softplus()
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.shape)
+        avg0 = self.avg(x).view([b, 1, c])
+        output0 = self.conv1(avg0)
+        output0 = self.sig(output0)
+
+        val1= [item.cpu().detach().numpy() for item in output0[0][0]]
+        for i in val1:
+            f = open(nano_o2s1,'a')
+            a = "%f,"%(i)
+            f.write(str(a),)
+            f.close
+        output1 = self.conv2(output0)
+
+        y = self.sig(output1)
+        val2 = [item.cpu().detach().numpy() for item in y[0][0]]
+        for i in val2:
+            f = open(nano_o2s2,'a')
+            a = "%f,"%(i)
+            f.write(str(a),)
+            f.close
+        y = y.view([b, c, 1, 1])
+        out = x * y
+        return out
